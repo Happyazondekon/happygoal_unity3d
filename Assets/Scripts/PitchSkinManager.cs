@@ -114,8 +114,18 @@ public class PitchSkinManager : MonoBehaviour
         RenderSettings.ambientSkyColor = match.ambientSky;
         RenderSettings.ambientGroundColor = match.ambientGround;
 
-        // The new mood becomes the "clear weather" baseline that
-        // WeatherController.Apply(Sunny) reverts to.
-        if (weather != null) weather.RefreshSunnyDefaults();
+        if (weather != null)
+        {
+            // The new mood becomes the "clear weather" baseline that
+            // WeatherController.Apply(Sunny) reverts to.
+            weather.RefreshSunnyDefaults();
+            // "pitch_snow" is the one skin that's actual weather, not just a
+            // lighting mood - make it genuinely snow rather than just tint
+            // the ground white (confirmed gap: equipping it previously had
+            // no visible snowfall at all).
+            weather.Apply(skinId == "pitch_snow"
+                ? WeatherController.Weather.Snow
+                : WeatherController.Weather.Sunny);
+        }
     }
 }

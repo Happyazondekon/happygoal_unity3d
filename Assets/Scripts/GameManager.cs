@@ -53,13 +53,33 @@ public class GameManager : MonoBehaviour
         ball.OnShotMissed -= HandleMissed;
     }
 
+    // True once FlutterBridge has taken over: HappyGoal's real shootout
+    // (5 rounds, sudden death, rewind, achievements...) lives in Flutter's
+    // GameController, which already decides direction/power/effect and the
+    // goal/save outcome itself - this scene's own autonomous approach/shoot
+    // loop below would fight FlutterBridge.PlayShot for control of the same
+    // kicker/keeper/ball, so it switches off the moment Flutter sends a real
+    // shot. Stays false (autonomous, keyboard-testable) when Play is pressed
+    // directly in the Editor instead of through the Flutter app.
+    public bool flutterControlled = false;
+
+    public void EnableFlutterControl()
+    {
+        if (flutterControlled) return;
+        flutterControlled = true;
+        StopAllCoroutines();
+        if (goalkeeperInput != null) goalkeeperInput.CancelWindow();
+    }
+
     void Start()
     {
-        NextAttempt();
+        if (!flutterControlled) NextAttempt();
     }
 
     void Update()
     {
+        if (flutterControlled) return;
+
         if (Input.GetKeyDown(toggleModeKey))
         {
             mode = mode == ControlMode.PlayerShoots ? ControlMode.PlayerDefends : ControlMode.PlayerShoots;
@@ -71,7 +91,7 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    void ApplyCameraForMode()
+    public void ApplyCameraForMode()
     {
         bool defending = mode == ControlMode.PlayerDefends;
         if (kickerCamera != null) kickerCamera.enabled = !defending;
@@ -85,6 +105,13 @@ public class GameManager : MonoBehaviour
     void HandleShotFired(Vector3 targetPoint)
     {
         if (gameAudio != null) gameAudio.PlayKick();
+
+        // Flutter's GameController already decided the outcome and told
+        // FlutterBridge.PlayShot to call PlayDirectedDive/ScheduleBlock
+        // itself before this shot was even fired - deciding again here
+        // (and re-triggering a second, conflicting dive animation) would
+        // fight that forced result instead of just visualizing it.
+        if (flutterControlled) return;
 
         if (mode == ControlMode.PlayerShoots)
         {
@@ -107,7 +134,11 @@ public class GameManager : MonoBehaviour
         if (confetti != null) confetti.Play();
         if (mode == ControlMode.PlayerShoots && kicker != null) StartCoroutine(kicker.PlayCelebration());
 
-        Invoke(nameof(NextAttempt), 2f);
+        // Flutter's GameController owns when the next attempt happens (it
+        // may show a rewind popup, wait on a dialog, run sudden death, end
+        // the match, etc.) - queuing our own NextAttempt() here would race
+        // FlutterBridge.PlayShot for control of the kicker/keeper/ball.
+        if (!flutterControlled) Invoke(nameof(NextAttempt), 2f);
     }
 
     void HandleBlocked()
@@ -115,13 +146,13 @@ public class GameManager : MonoBehaviour
         Debug.Log($"Arrete par le gardien. Score: {goals}/{attempts}");
         if (gameAudio != null) gameAudio.PlaySave();
         if (ActiveCameraEffects != null) ActiveCameraEffects.Shake();
-        Invoke(nameof(NextAttempt), 1.5f);
+        if (!flutterControlled) Invoke(nameof(NextAttempt), 1.5f);
     }
 
     void HandleMissed()
     {
         Debug.Log($"Tir manque. Score: {goals}/{attempts}");
-        Invoke(nameof(NextAttempt), 1.5f);
+        if (!flutterControlled) Invoke(nameof(NextAttempt), 1.5f);
     }
 
     void NextAttempt()

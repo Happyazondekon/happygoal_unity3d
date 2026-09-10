@@ -3,6 +3,8 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 public static class PrototypeSceneBuilder
 {
@@ -164,6 +166,15 @@ public static class PrototypeSceneBuilder
         goalCenterMarker.transform.SetParent(goal.transform);
         goalCenterMarker.transform.localPosition = Vector3.zero;
 
+        // Score now renders on the stadium's own big screen ("Scoreboards" in
+        // Football Arena.fbx) instead of the 2D HUD overlay - built here since
+        // it needs both the arena model and the goal's position to orient
+        // itself. Null when the arena model failed to load (procedural stand
+        // fallback has no screen mesh to mount on).
+        var jumbotron = arenaModel != null
+            ? BuildJumbotronScoreboard(arenaModel.transform, goalCenterMarker.transform)
+            : null;
+
         var ball = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         ball.name = "Ball";
         ball.transform.position = new Vector3(0, 0.11f, 0f);
@@ -240,9 +251,13 @@ public static class PrototypeSceneBuilder
         var camGO = new GameObject("Main Camera");
         camGO.tag = "MainCamera";
         var cam = camGO.AddComponent<Camera>();
-        camGO.transform.position = new Vector3(0f, 1.7f, -3.2f);
-        camGO.transform.LookAt(new Vector3(0f, 1.2f, 8f));
-        cam.fieldOfView = 55f;
+        // Pulled back and raised from the original (0, 1.7, -3.2) so the
+        // kicker (right in front of the camera) doesn't dominate a portrait
+        // phone frame, and widened the FOV so the full 7.32m goal width
+        // stays in view instead of being cropped at the edges.
+        camGO.transform.position = new Vector3(0f, 2.3f, -5.6f);
+        camGO.transform.LookAt(new Vector3(0f, 1.4f, 10f));
+        cam.fieldOfView = 62f;
         camGO.AddComponent<AudioListener>();
         var camEffects = camGO.AddComponent<CameraEffects>();
 
@@ -253,10 +268,15 @@ public static class PrototypeSceneBuilder
         var gkCamGO = new GameObject("Goalkeeper Camera");
         var gkCam = gkCamGO.AddComponent<Camera>();
         // Pulled back far enough to fit the full goal width (posts are 3.66m
-        // either side) in frame, not just the keeper/kicker close up.
-        gkCamGO.transform.position = new Vector3(0f, 3.2f, 18f);
+        // either side) in frame, not just the keeper/kicker close up. On a
+        // portrait phone the horizontal FOV is narrower than this vertical
+        // fieldOfView (aspect < 1), so needs more distance/FOV margin than
+        // the raw numbers suggest - confirmed on-device the goal was still
+        // getting cropped at (0,3.2,18)/55, same issue the kicker camera had;
+        // pulled back again from (0,3.4,24) per a second on-device pass.
+        gkCamGO.transform.position = new Vector3(0f, 3.6f, 28f);
         gkCamGO.transform.LookAt(new Vector3(0f, 1.0f, 0f));
-        gkCam.fieldOfView = 55f;
+        gkCam.fieldOfView = 62f;
         var gkListener = gkCamGO.AddComponent<AudioListener>();
         var gkCamEffects = gkCamGO.AddComponent<CameraEffects>();
         gkCam.enabled = false;
@@ -296,13 +316,47 @@ public static class PrototypeSceneBuilder
         pitchSkin.pitchRenderer = pitch.GetComponent<Renderer>();
         pitchSkin.sun = light;
         pitchSkin.weather = weather;
+
+        var flutterBridge = gmGO.AddComponent<FlutterBridge>();
+        flutterBridge.gameManager = gm;
+        flutterBridge.ball = ballScript;
+        flutterBridge.ballSkin = ball.GetComponent<BallSkinManager>();
+        flutterBridge.kickerBoots = kickerAnim.GetComponent<BootsSkinManager>();
+        flutterBridge.keeperBoots = keeperScript.GetComponent<BootsSkinManager>();
+        flutterBridge.pitchSkin = pitchSkin;
+        flutterBridge.penaltyKickInput = input;
+
+        // MatchController is the new match-flow owner (see the
+        // Unity-as-separate-Activity plan) - FlutterBridge above stays wired
+        // but unused until the Phase 4 cleanup deletes it for good.
+        var matchController = gmGO.AddComponent<MatchController>();
+        matchController.gameManager = gm;
+        matchController.ball = ballScript;
+        matchController.penaltyKickInput = input;
+        matchController.goalkeeperInput = keeperInput;
+        matchController.ballSkin = ball.GetComponent<BallSkinManager>();
+        matchController.kickerBoots = kickerAnim.GetComponent<BootsSkinManager>();
+        matchController.keeperBoots = keeperScript.GetComponent<BootsSkinManager>();
+        matchController.pitchSkin = pitchSkin;
+        matchController.kickerKitTint = kickerAnim.GetComponent<TeamKitTint>();
+        matchController.keeperKitTint = keeperScript.GetComponent<TeamKitTint>();
+        matchController.weather = weather;
+        matchController.jumbotron = jumbotron;
+
+        input.gameManager = gm;
+        input.matchController = matchController;
         input.ball = ballScript;
         input.kicker = kickerAnim;
         input.goalCenterPoint = goalCenterMarker.transform;
         input.goalHalfWidth = halfWidth - 0.3f;
         input.goalHeight = height - 0.2f;
+        input.aimLine = BuildAimLine();
+        keeperInput.gameManager = gm;
+        keeperInput.matchController = matchController;
         keeperInput.ball = ballScript;
         keeperInput.keeper = keeperScript;
+
+        matchController.hud = BuildHud();
 
         string scenesDir = "Assets/Scenes";
         if (!Directory.Exists(scenesDir)) Directory.CreateDirectory(scenesDir);
@@ -312,6 +366,365 @@ public static class PrototypeSceneBuilder
         EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(scenePath, true) };
 
         Debug.Log("Penalty prototype scene built at " + scenePath);
+    }
+
+    // ---- In-match HUD --------------------------------------------------------
+    // Net-new for the Unity-as-separate-Activity migration (see the plan) -
+    // built procedurally like the rest of this scene, driven by
+    // MatchController exactly the way BallController/KickerAnimatorBase/
+    // GoalkeeperAnimatorBase already are. Legacy UnityEngine.UI (Text/Image/
+    // Button), not TextMeshPro - see MatchHud.cs's class doc for why.
+
+    static MatchHud BuildHud()
+    {
+        var canvasGO = new GameObject("Match HUD Canvas", typeof(RectTransform));
+        var canvas = canvasGO.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        var scaler = canvasGO.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1080, 1920);
+        scaler.matchWidthOrHeight = 0.5f;
+        canvasGO.AddComponent<GraphicRaycaster>();
+
+        new GameObject("HUD EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+
+        var hud = canvasGO.AddComponent<MatchHud>();
+
+        Color panelBg = new Color(0f, 0f, 0f, 0.5f);
+        Color gold = MatchHud.HgColor("#FFC72C");
+        Color blue = MatchHud.HgColor("#1D8CF0");
+        Color crimson = MatchHud.HgColor("#DC143C");
+
+        // ---- Top bar: shot pips, score, round, sudden death ----
+        // Stacked as separate ROWS (not sharing a row with anything else) so
+        // there's no risk of two elements' horizontal spans colliding - two
+        // earlier attempts placed the score pill in the same row as the pips
+        // and tried to separate them left/right, which visibly still
+        // overlapped on-device both times despite the math checking out on
+        // paper, so this sidesteps that entirely instead of trying a third
+        // horizontal offset blind.
+        var topBar = NewPanel("TopBar", canvasGO.transform, panelBg);
+        AnchorRect(topBar.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0.5f, 1), new Vector2(0, 0), new Vector2(0, 400));
+
+        hud.team1Pips = BuildPipsRow("Team1Pips", topBar.transform, new Vector2(0f, 1f), new Vector2(30, -50));
+        hud.team2Pips = BuildPipsRow("Team2Pips", topBar.transform, new Vector2(1f, 1f), new Vector2(-30, -50));
+
+        // Persistent "rewinds left" badge - left side, always visible
+        // (distinct from rewindPanel below, the transient after-a-miss
+        // offer popup) - the icon is just a colored circle since this
+        // project has no bundled icon font/sprite for it.
+        var rewindBadge = NewPanel("RewindBadge", topBar.transform, blue);
+        AnchorRect(rewindBadge.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(30, -95), new Vector2(70, 70));
+        hud.rewindBadgeCountText = NewText("Count", rewindBadge.transform, "0", 32, Color.white, FontStyle.Bold);
+        AnchorRect(hud.rewindBadgeCountText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        // Score pill - a prominent "scoreboard" badge (matches the old
+        // Flutter ScoreBoardWidget's gold-pill look this HUD was originally
+        // ported from) - own row, below the pips/rewind-badge row above.
+        var scorePill = NewPanel("ScorePill", topBar.transform, gold);
+        AnchorRect(scorePill.rectTransform, new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0, -180), new Vector2(230, 90));
+        hud.scoreText = NewText("ScoreText", scorePill.transform, "0 - 0", 48, new Color(0.12f, 0.07f, 0f), FontStyle.Bold);
+        AnchorRect(hud.scoreText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        hud.roundText = NewText("RoundText", topBar.transform, "1/5", 30, Color.white);
+        AnchorRect(hud.roundText.rectTransform, new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0, -280), new Vector2(500, 50));
+
+        hud.suddenDeathText = NewText("SuddenDeathText", topBar.transform, "SUDDEN DEATH", 30, crimson, FontStyle.Bold);
+        AnchorRect(hud.suddenDeathText.rectTransform, new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0.5f, 1), new Vector2(0, -335), new Vector2(600, 50));
+
+        // ---- Result banner (centre-upper, hidden by default) ----
+        var resultBanner = NewPanel("ResultBanner", canvasGO.transform, panelBg);
+        AnchorRect(resultBanner.rectTransform, new Vector2(0.5f, 0.62f), new Vector2(0.5f, 0.62f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(950, 150));
+        hud.resultBannerPanel = resultBanner.gameObject;
+        hud.resultText = NewText("ResultText", resultBanner.transform, "", 52, Color.white, FontStyle.Bold);
+        AnchorRect(hud.resultText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        // ---- Turn prompt (centre-lower, hidden by default) ----
+        var turnPrompt = NewPanel("TurnPrompt", canvasGO.transform, panelBg);
+        AnchorRect(turnPrompt.rectTransform, new Vector2(0.5f, 0.32f), new Vector2(0.5f, 0.32f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(700, 90));
+        hud.turnPromptPanel = turnPrompt.gameObject;
+        hud.turnPromptText = NewText("TurnPromptText", turnPrompt.transform, "", 34, Color.white, FontStyle.Bold);
+        AnchorRect(hud.turnPromptText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        // ---- Bottom bar: rewind offer ----
+        // Effect selector removed - effect is now detected from the shot
+        // swipe's shape (curl/power/verticality), not picked from a button
+        // beforehand. See PenaltyKickInput.DetectEffect.
+        var bottomBar = NewPanel("BottomBar", canvasGO.transform, panelBg);
+        AnchorRect(bottomBar.rectTransform, new Vector2(0, 0), new Vector2(1, 0), new Vector2(0.5f, 0), new Vector2(0, 0), new Vector2(0, 320));
+
+        var rewindPanel = NewUIElement("RewindPanel", bottomBar.transform);
+        AnchorRect(rewindPanel, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 20), new Vector2(500, 160));
+        hud.rewindPanel = rewindPanel.gameObject;
+        var rewindBtnImage = NewPanel("RewindButton", rewindPanel, blue);
+        AnchorRect(rewindBtnImage.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(320, 110));
+        hud.rewindButton = rewindBtnImage.gameObject.AddComponent<Button>();
+        hud.rewindButtonLabel = NewText("Label", rewindBtnImage.transform, MatchLocalization.Get("rewind_offer"), 34, Color.white, FontStyle.Bold);
+        AnchorRect(hud.rewindButtonLabel.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+        hud.rewindCountText = NewText("Count", rewindBtnImage.transform, "0", 24, gold, FontStyle.Bold);
+        AnchorRect(hud.rewindCountText.rectTransform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-10, -10), new Vector2(50, 40));
+
+        return hud;
+    }
+
+    // White line shown while the player drags to shoot (PenaltyKickInput.
+    // UpdateAimPreview/DrawAimLine) - a real-time preview of exactly where
+    // the shot will go, bowing sideways when the swipe is curled to show a
+    // curve shot is being aimed. Disabled by default; PenaltyKickInput turns
+    // it on/off itself while dragging.
+    static LineRenderer BuildAimLine()
+    {
+        var go = new GameObject("AimLine");
+        var line = go.AddComponent<LineRenderer>();
+        line.material = new Material(Shader.Find("Sprites/Default"));
+        line.startColor = Color.white;
+        line.endColor = new Color(1f, 1f, 1f, 0.35f);
+        line.startWidth = 0.05f;
+        line.endWidth = 0.05f;
+        line.positionCount = 20;
+        line.useWorldSpace = true;
+        line.numCapVertices = 4;
+        line.enabled = false;
+        return line;
+    }
+
+    // ---- Jumbotron: score rendered on the stadium's own big screen mesh
+    // (Football Arena.fbx's "Scoreboards" child) instead of the 2D HUD, per
+    // the user's request. A world-space Canvas mounted at that mesh's world
+    // bounds, oriented to face back toward the goal (where the match cameras
+    // actually sit) regardless of which way the source mesh itself faces. ----
+
+    // The arena FBX's two "Scoreboards" objects turned out (per two prior
+    // attempts, logged and checked) to NOT be compact individual screens at
+    // all - each is one continuous strip mesh (likely a ribbon board running
+    // most of the stadium's length), ~180m end to end even per submesh. A
+    // canvas mounted at any whole-mesh or whole-submesh centre lands in
+    // mid-air, nowhere near the goal. What actually reads as "the screen
+    // behind the goal" in the game is just the small slice of that strip
+    // that happens to be near the goal in camera view - so instead of using
+    // the whole mesh, only the vertices within a modest radius of the goal
+    // are kept (GetSubmeshWorldBoundsNear), giving the bounds of that local
+    // slice. We don't know upfront which of the resulting slices sits in
+    // the match cameras' view, so a canvas is mounted on every one found;
+    // each is its own JumbotronScoreboard, combined behind one component so
+    // MatchController only has one thing to call.
+    static JumbotronScoreboard BuildJumbotronScoreboard(Transform arenaRoot, Transform goalCenter)
+    {
+        var screenNames = new[] { "Scoreboards", "Scoreboards.001" };
+        var built = new System.Collections.Generic.List<JumbotronScoreboard>();
+        // Both named objects' submeshes turned out (per a diagnostic pass,
+        // logged and checked) to all cluster at the same physical screen -
+        // "Scoreboards.001" is a near-duplicate of "Scoreboards", and each
+        // object's 2 submeshes are its housing/frame vs. the flat glass
+        // panel, not two different screens. Dedup by proximity so the same
+        // screen doesn't get 2-4 stacked, z-fighting canvases.
+        var usedCenters = new System.Collections.Generic.List<Vector3>();
+        const float nearRadius = 100f;
+        const float dedupRadius = 5f;
+
+        foreach (var name in screenNames)
+        {
+            var screenMesh = FindDeepChild(arenaRoot, name);
+            if (screenMesh == null) continue;
+
+            var mf = screenMesh.GetComponent<MeshFilter>();
+            int subMeshCount = mf != null && mf.sharedMesh != null ? mf.sharedMesh.subMeshCount : 0;
+
+            for (int sub = 0; sub < subMeshCount; sub++)
+            {
+                var bounds = GetSubmeshWorldBoundsNear(screenMesh, sub, goalCenter.position, nearRadius);
+                if (bounds == null) continue;
+
+                // Sanity filter: a correctly-isolated slice near the goal
+                // should be a modest, roughly flat rectangle, not still the
+                // whole 180m strip.
+                if (bounds.Value.size.x > 25f || bounds.Value.size.y > 25f || bounds.Value.size.z > 25f)
+                {
+                    Debug.Log($"BuildJumbotronScoreboard: '{name}[{sub}]' near-goal bounds still too large ({bounds.Value.size}) - skipped.");
+                    continue;
+                }
+                if (bounds.Value.size.magnitude < 0.3f) continue;
+
+                bool isDuplicate = false;
+                foreach (var used in usedCenters)
+                {
+                    if (Vector3.Distance(used, bounds.Value.center) < dedupRadius) { isDuplicate = true; break; }
+                }
+                if (isDuplicate)
+                {
+                    Debug.Log($"BuildJumbotronScoreboard: '{name}[{sub}]' duplicates an already-mounted screen - skipped.");
+                    continue;
+                }
+
+                var single = BuildJumbotronOnBounds(bounds.Value, goalCenter, $"{name}[{sub}]");
+                if (single != null)
+                {
+                    built.Add(single);
+                    usedCenters.Add(bounds.Value.center);
+                }
+            }
+        }
+
+        if (built.Count == 0)
+        {
+            Debug.LogWarning("BuildJumbotronScoreboard: no usable screen slice found near the goal.");
+            return null;
+        }
+
+        var hostGO = new GameObject("Jumbotrons");
+        var combined = hostGO.AddComponent<JumbotronScoreboard>();
+        var texts = new System.Collections.Generic.List<Text>();
+        foreach (var one in built)
+        {
+            if (one.scoreTexts != null) texts.AddRange(one.scoreTexts);
+        }
+        combined.scoreTexts = texts.ToArray();
+        return combined;
+    }
+
+    // Bounds of only the submesh's vertices that fall within maxDistance of
+    // worldPoint (world space) - isolates a local slice of a mesh that
+    // otherwise spans a much larger area (see BuildJumbotronScoreboard).
+    static Bounds? GetSubmeshWorldBoundsNear(Transform t, int submeshIndex, Vector3 worldPoint, float maxDistance)
+    {
+        var mf = t.GetComponent<MeshFilter>();
+        if (mf == null || mf.sharedMesh == null) return null;
+        var mesh = mf.sharedMesh;
+        if (submeshIndex < 0 || submeshIndex >= mesh.subMeshCount) return null;
+
+        var triangles = mesh.GetTriangles(submeshIndex);
+        if (triangles.Length == 0) return null;
+        var vertices = mesh.vertices;
+        var matrix = t.localToWorldMatrix;
+        float maxDistSqr = maxDistance * maxDistance;
+
+        Bounds? world = null;
+        var seen = new System.Collections.Generic.HashSet<int>();
+        foreach (var idx in triangles)
+        {
+            if (!seen.Add(idx)) continue;
+            Vector3 worldVertex = matrix.MultiplyPoint3x4(vertices[idx]);
+            if ((worldVertex - worldPoint).sqrMagnitude > maxDistSqr) continue;
+
+            if (world == null)
+            {
+                world = new Bounds(worldVertex, Vector3.zero);
+            }
+            else
+            {
+                var b = world.Value;
+                b.Encapsulate(worldVertex);
+                world = b;
+            }
+        }
+        return world;
+    }
+
+    static JumbotronScoreboard BuildJumbotronOnBounds(Bounds bounds, Transform goalCenter, string debugName)
+    {
+        // World-space UI reads correctly from its -Z side, so point +Z away
+        // from the goal - that way the readable face looks back toward the
+        // goal/pitch, where every match camera lives.
+        Vector3 awayFromGoal = bounds.center - goalCenter.position;
+        Vector3 awayFromGoalDir = awayFromGoal.sqrMagnitude > 0.0001f ? awayFromGoal.normalized : Vector3.forward;
+        Quaternion rotation = Quaternion.LookRotation(awayFromGoalDir);
+
+        // Pull the canvas out of the mesh's own surface, toward the goal -
+        // mounting it exactly at the AABB centre risks sitting behind (or
+        // exactly coincident with) the screen's own geometry, which fails
+        // the UI shader's depth test against that opaque mesh and renders
+        // nothing at all.
+        Vector3 position = bounds.center - awayFromGoalDir * 0.2f;
+
+        Debug.Log($"BuildJumbotronScoreboard: mounting on '{debugName}' at {position}, bounds center={bounds.center} size={bounds.size}");
+
+        var canvasGO = new GameObject("JumbotronCanvas_" + debugName, typeof(RectTransform));
+        canvasGO.transform.position = position;
+        canvasGO.transform.rotation = rotation;
+
+        var canvas = canvasGO.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.WorldSpace;
+        var rect = canvasGO.GetComponent<RectTransform>();
+        rect.sizeDelta = new Vector2(400, 200);
+
+        float worldWidth = Mathf.Max(bounds.size.x, bounds.size.z, 2f);
+        float worldHeight = Mathf.Max(bounds.size.y, 1f);
+        canvasGO.transform.localScale = new Vector3(worldWidth / 400f, worldHeight / 200f, 1f);
+
+        var bg = NewPanel("Background", canvasGO.transform, new Color(0f, 0.05f, 0.02f, 0.7f));
+        AnchorRect(bg.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        var scoreText = NewText("ScoreText", canvasGO.transform, "0 - 0", 120, MatchHud.HgColor("#FFC72C"), FontStyle.Bold);
+        AnchorRect(scoreText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
+
+        var jumbotron = canvasGO.AddComponent<JumbotronScoreboard>();
+        jumbotron.scoreTexts = new[] { scoreText };
+        return jumbotron;
+    }
+
+    static Image[] BuildPipsRow(string name, Transform parent, Vector2 anchor, Vector2 anchoredPos)
+    {
+        var container = NewUIElement(name, parent);
+        container.anchorMin = anchor;
+        container.anchorMax = anchor;
+        container.pivot = anchor;
+        container.anchoredPosition = anchoredPos;
+        container.sizeDelta = new Vector2(220, 40);
+        var layout = container.gameObject.AddComponent<HorizontalLayoutGroup>();
+        layout.spacing = 8;
+        layout.childAlignment = anchor.x < 0.5f ? TextAnchor.MiddleLeft : TextAnchor.MiddleRight;
+        layout.childForceExpandWidth = false;
+        layout.childForceExpandHeight = false;
+
+        var pips = new Image[PenaltySettings.ShotsPerTeam];
+        for (int i = 0; i < pips.Length; i++)
+        {
+            var dot = NewPanel("Pip" + i, container.transform, new Color(1f, 1f, 1f, 0.2f));
+            var le = dot.gameObject.AddComponent<LayoutElement>();
+            le.preferredWidth = 28;
+            le.preferredHeight = 28;
+            pips[i] = dot;
+        }
+        return pips;
+    }
+
+    static RectTransform NewUIElement(string name, Transform parent)
+    {
+        var go = new GameObject(name, typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        return go.GetComponent<RectTransform>();
+    }
+
+    static Image NewPanel(string name, Transform parent, Color color)
+    {
+        var rt = NewUIElement(name, parent);
+        var img = rt.gameObject.AddComponent<Image>();
+        img.color = color;
+        return img;
+    }
+
+    static Text NewText(string name, Transform parent, string content, int fontSize, Color color, FontStyle style = FontStyle.Normal)
+    {
+        var rt = NewUIElement(name, parent);
+        var txt = rt.gameObject.AddComponent<Text>();
+        txt.text = content;
+        txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        txt.fontSize = fontSize;
+        txt.fontStyle = style;
+        txt.color = color;
+        txt.alignment = TextAnchor.MiddleCenter;
+        txt.horizontalOverflow = HorizontalWrapMode.Overflow;
+        txt.verticalOverflow = VerticalWrapMode.Overflow;
+        return txt;
+    }
+
+    static void AnchorRect(RectTransform rt, Vector2 anchorMin, Vector2 anchorMax, Vector2 pivot, Vector2 anchoredPosition, Vector2 sizeDelta)
+    {
+        rt.anchorMin = anchorMin;
+        rt.anchorMax = anchorMax;
+        rt.pivot = pivot;
+        rt.anchoredPosition = anchoredPosition;
+        rt.sizeDelta = sizeDelta;
     }
 
     // ---- Mixamo import + character setup -----------------------------------
@@ -551,6 +964,7 @@ public static class PrototypeSceneBuilder
         instance.transform.rotation = Quaternion.Euler(0, 180f, 0);
         TintCharacterKit(instance, shirtColor, skinColor);
         instance.AddComponent<BootsSkinManager>();
+        instance.AddComponent<TeamKitTint>();
 
         var animator = instance.GetComponent<Animator>();
         if (animator == null) animator = instance.AddComponent<Animator>();
@@ -584,6 +998,7 @@ public static class PrototypeSceneBuilder
         instance.transform.rotation = Quaternion.Euler(0, 15f, 0);
         TintCharacterKit(instance, shirtColor, skinColor);
         instance.AddComponent<BootsSkinManager>();
+        instance.AddComponent<TeamKitTint>();
 
         var animator = instance.GetComponent<Animator>();
         if (animator == null) animator = instance.AddComponent<Animator>();

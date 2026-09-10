@@ -15,6 +15,13 @@ public class GoalkeeperInput : MonoBehaviour
     public BallController ball;
     public GoalkeeperAnimatorBase keeper;
 
+    // When set (real match, via MatchController), the dive direction chosen
+    // here is reported to MatchController (ShotResolver decides the save,
+    // not the radius check below) instead of being resolved locally. See
+    // Resolve().
+    public GameManager gameManager;
+    public MatchController matchController;
+
     // Must resolve before the fastest possible AI shot reaches the goal
     // line, or the ball scores before a late input can ever call
     // ScheduleBlock() - see the comment in GameManager.ApproachThenAiShoot.
@@ -102,6 +109,14 @@ public class GoalkeeperInput : MonoBehaviour
         dragging = false;
 
         if (keeper != null) keeper.PlayDirectedDive(chosenX);
+
+        if (gameManager != null && gameManager.flutterControlled)
+        {
+            int diveZone = chosenX < -maxDiveX * 0.3f ? ShotDirection.Left
+                : (chosenX > maxDiveX * 0.3f ? ShotDirection.Right : ShotDirection.Center);
+            if (matchController != null) matchController.ReportGoalkeeperChoice(diveZone);
+            return;
+        }
 
         bool saved = Mathf.Abs(chosenX - pendingTargetX) <= saveRadius;
         Debug.Log($"Goalkeeper dove to X={chosenX:F2} ({reason}) - shot was at X={pendingTargetX:F2} - {(saved ? "SAVED" : "not saved")}");

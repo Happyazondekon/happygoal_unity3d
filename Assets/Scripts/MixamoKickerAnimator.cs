@@ -11,8 +11,14 @@ public class MixamoKickerAnimator : KickerAnimatorBase
 {
     public Animator animator;
 
+    // Fires ball.Shoot() when the "Kick" clip reaches this normalized time -
+    // was 0.6, confirmed on-device (via a gameplay video the user shared)
+    // that the ball launched before the foot visually reached it, so this is
+    // a first-pass bump. There's no Editor GUI in this environment to eyeball
+    // the clip's real contact frame, so this may need one more nudge after
+    // the next on-device test.
     [Range(0f, 1f)]
-    public float contactNormalizedTime = 0.6f;
+    public float contactNormalizedTime = 0.75f;
 
     Vector3 homePosition;
     Quaternion homeRotation;
