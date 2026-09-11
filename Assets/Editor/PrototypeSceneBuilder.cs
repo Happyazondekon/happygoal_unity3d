@@ -446,15 +446,19 @@ public static class PrototypeSceneBuilder
         hud.turnPromptText = NewText("TurnPromptText", turnPrompt.transform, "", 34, Color.white, FontStyle.Bold);
         AnchorRect(hud.turnPromptText.rectTransform, Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f), Vector2.zero, Vector2.zero);
 
-        // ---- Bottom bar: rewind offer ----
+        // ---- Bottom bar (now empty - kept as a hook in case future HUD
+        // elements need it) ----
         // Effect selector removed - effect is now detected from the shot
         // swipe's shape (curl/power/verticality), not picked from a button
         // beforehand. See PenaltyKickInput.DetectEffect.
         var bottomBar = NewPanel("BottomBar", canvasGO.transform, panelBg);
         AnchorRect(bottomBar.rectTransform, new Vector2(0, 0), new Vector2(1, 0), new Vector2(0.5f, 0), new Vector2(0, 0), new Vector2(0, 320));
 
-        var rewindPanel = NewUIElement("RewindPanel", bottomBar.transform);
-        AnchorRect(rewindPanel, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 20), new Vector2(500, 160));
+        // Rewind offer - dead center of the screen, not tucked into the
+        // bottom bar, so the player can't miss it in the few seconds the
+        // countdown gives them to react.
+        var rewindPanel = NewUIElement("RewindPanel", canvasGO.transform);
+        AnchorRect(rewindPanel, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(500, 160));
         hud.rewindPanel = rewindPanel.gameObject;
         var rewindBtnImage = NewPanel("RewindButton", rewindPanel, blue);
         AnchorRect(rewindBtnImage.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(320, 110));

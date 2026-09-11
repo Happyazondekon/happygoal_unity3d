@@ -182,7 +182,7 @@ public class MatchController : MonoBehaviour
     // Pauses turn progression so the player can actually choose, mirroring
     // GameController's rewind popup - times out to "keep the result" after a
     // few seconds so a missed tap can't stall the match forever.
-    const float RewindOfferSeconds = 5f;
+    const float RewindOfferSeconds = 3f;
 
     IEnumerator OfferRewind()
     {
